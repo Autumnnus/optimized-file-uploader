@@ -111,11 +111,11 @@ router.get("/optimized/get-upload-url", async (req: Request, res: Response) => {
       24 * 60 * 60
     );
 
-    console.log(`[Optimized] Generated Upload URL for: ${filename}`);
-    res.json({ url: presignedUrl, filename });
+    console.log(`[Optimized] Completed Multipart Upload for: ${filename}`);
+    res.json({ message: "Upload complete" });
   } catch (err) {
-    console.error("[Optimized] Error generating upload URL:", err);
-    res.status(500).send("Error generating URL");
+    console.error("[Optimized] Error completing multipart upload:", err);
+    res.status(500).send("Error completing multipart upload");
   }
 });
 
