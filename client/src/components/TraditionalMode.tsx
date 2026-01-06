@@ -146,11 +146,11 @@ export const TraditionalMode: React.FC<TraditionalModeProps> = ({
         <span>⚠️</span> Mod A: Traditional Method
       </h2>
       <p className="text-gray-400 text-sm mb-6">
-        File is sent to Node.js server first, then buffered/piped to MinIO.
-        Video playback is also proxied through Node.js.
+        File is sent to Node.js server and stored on Local Disk (No Object
+        Storage). Video playback is also served directly from the server's disk.
         <br />
         <span className="text-xs text-red-500 font-mono mt-1 block">
-          Bottleneck: Node.js Network & RAM
+          Bottleneck: Node.js Network, RAM & Disk I/O
         </span>
       </p>
 

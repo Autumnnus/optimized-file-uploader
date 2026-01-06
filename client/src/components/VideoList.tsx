@@ -1,9 +1,11 @@
 import axios from "axios";
 import React, { useEffect, useState } from "react";
+import { cn } from "../lib/utils";
 
 interface Video {
   name: string;
   size: number;
+  source: "local" | "minio";
 }
 
 interface VideoListProps {
@@ -97,6 +99,16 @@ export const VideoList: React.FC<VideoListProps> = ({
                 >
                   {video.name}
                 </div>
+                <div
+                  className={cn(
+                    "text-[9px] px-1.5 py-0.5 rounded-full uppercase font-bold",
+                    video.source === "local"
+                      ? "bg-gray-700 text-gray-300"
+                      : "bg-emerald-500/20 text-emerald-400"
+                  )}
+                >
+                  {video.source}
+                </div>
                 <button
                   onClick={(e) => handleDelete(e, video.name)}
                   className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/20 text-gray-500 hover:text-red-400 rounded transition-all"
@@ -115,7 +127,7 @@ export const VideoList: React.FC<VideoListProps> = ({
                   </svg>
                 </button>
               </div>
-              <div className="text-[10px] text-gray-400 font-mono">
+              <div className="text-[10px] text-gray-400 font-mono mt-1">
                 {(video.size / (1024 * 1024)).toFixed(2)} MB
               </div>
             </button>
