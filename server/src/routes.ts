@@ -125,4 +125,33 @@ router.get(
   }
 );
 
+router.get("/videos", async (_req: Request, res: Response) => {
+  try {
+    const objects: any[] = [];
+    const stream = minioClient.listObjects(BUCKET_NAME, "", true);
+
+    stream.on("data", (obj) => objects.push(obj));
+    stream.on("end", () => res.json(objects));
+    stream.on("error", (err) => {
+      console.error("[MinIO] List objects error:", err);
+      res.status(500).send("Error listing videos");
+    });
+  } catch (err) {
+    console.error("[MinIO] Unexpected error:", err);
+    res.status(500).send("Internal server error");
+  }
+});
+
+router.delete("/videos/:filename", async (req: Request, res: Response) => {
+  try {
+    const filename = req.params.filename;
+    await minioClient.removeObject(BUCKET_NAME, filename);
+    console.log(`[MinIO] Deleted object: ${filename}`);
+    res.json({ message: "Video deleted successfully" });
+  } catch (err) {
+    console.error("[MinIO] Delete error:", err);
+    res.status(500).send("Error deleting video");
+  }
+});
+
 export default router;
