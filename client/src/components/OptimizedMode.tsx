@@ -58,40 +58,86 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
     }
   };
 
+  // Chunk size: 6MB (MinIO requires min 5MB for all parts except the last)
+  const CHUNK_SIZE = 6 * 1024 * 1024;
+
   const handleUpload = async () => {
     if (!file) return;
 
     setUploading(true);
     setUploadProgress(0);
-    setStatus("Getting Presigned URL...");
+    setStatus("Initiating Multipart Upload...");
     const startTime = performance.now();
 
     try {
-      // 1. Get Presigned PUT URL
+      // 1. Initiate Multipart Upload
       const {
-        data: { url: uploadUrl, filename },
-      } = await axios.get(
-        `http://localhost:3001/api/optimized/get-upload-url?filename=${encodeURIComponent(
-          file.name
-        )}`
+        data: { uploadId, filename },
+      } = await axios.post(
+        "http://localhost:3001/api/optimized/initiate-multipart",
+        {
+          filename: file.name,
+          contentType: file.type,
+        }
       );
 
-      setStatus("Direct Upload to MinIO...");
+      const totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      const uploadedParts: { ETag: string; PartNumber: number }[] = [];
+      let uploadedBytes = 0;
 
-      // 2. Upload directly to MinIO using XMLHttpRequest for progress
-      await axios.put(uploadUrl, file, {
-        headers: {
-          "Content-Type": file.type,
-        },
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percent = Math.round(
-              (progressEvent.loaded * 100) / progressEvent.total
-            );
-            setUploadProgress(percent);
+      setStatus(`Uploading ${totalParts} parts...`);
+
+      // 2. Upload chunks
+      for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+        const start = (partNumber - 1) * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        // Get Presigned URL for this part
+        const {
+          data: { url: partUrl },
+        } = await axios.post(
+          "http://localhost:3001/api/optimized/get-multipart-url",
+          {
+            filename,
+            uploadId,
+            partNumber,
           }
-        },
-      });
+        );
+
+        // Upload part directly to MinIO
+        // Note: MinIO returns ETag in response headers for PUT
+        const response = await axios.put(partUrl, chunk, {
+          headers: { "Content-Type": "application/octet-stream" },
+          onUploadProgress: (progressEvent) => {
+            const chunkLoaded = progressEvent.loaded;
+            const totalLoaded = uploadedBytes + chunkLoaded;
+            const percent = Math.round((totalLoaded * 100) / file.size);
+            setUploadProgress(percent);
+          },
+        });
+
+        uploadedBytes += chunk.size;
+
+        // ETag is normally wrapped in quotes, e.g. "hash"
+        const etag = response.headers["etag"].replace(/"/g, "");
+        uploadedParts.push({ ETag: etag, PartNumber: partNumber });
+
+        // Optional: Update status per chunk for transparency
+        // setStatus(`Uploaded Part ${partNumber}/${totalParts}`);
+      }
+
+      setStatus("Finalizing Upload...");
+
+      // 3. Complete Multipart Upload
+      await axios.post(
+        "http://localhost:3001/api/optimized/complete-multipart",
+        {
+          filename,
+          uploadId,
+          parts: uploadedParts,
+        }
+      );
 
       const endTime = performance.now();
       setStats({
@@ -104,7 +150,7 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
         onUploadSuccess(filename);
       }
 
-      // 3. Get Presigned GET URL for playback
+      // 4. Get Download URL
       const {
         data: { url: downloadUrl },
       } = await axios.get(
