@@ -95,6 +95,142 @@ router.get(
   }
 );
 
+// --- Traditional Chunked Upload ---
+
+const CHUNK_STORAGE = path.join(process.cwd(), "uploads", "chunks");
+if (!fs.existsSync(CHUNK_STORAGE)) {
+  fs.mkdirSync(CHUNK_STORAGE, { recursive: true });
+}
+
+router.post(
+  "/traditional/chunk/init",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { filename, totalChunks } = req.body;
+      if (!filename || !totalChunks) {
+        res.status(400).send("filename and totalChunks required");
+        return;
+      }
+
+      const uploadId = `${Date.now()}-${Math.random()
+        .toString(36)
+        .substring(7)}`;
+      const chunkDir = path.join(CHUNK_STORAGE, uploadId);
+      fs.mkdirSync(chunkDir, { recursive: true });
+
+      console.log(
+        `[Traditional Chunked] Init upload: ${uploadId} for ${filename}`
+      );
+      res.json({ uploadId, filename, totalChunks });
+    } catch (err) {
+      console.error("[Traditional Chunked] Init error:", err);
+      res.status(500).send("Init failed");
+    }
+  }
+);
+
+const chunkUpload = multer({ dest: "uploads/temp/" });
+router.post(
+  "/traditional/chunk/upload",
+  chunkUpload.single("chunk"),
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { uploadId, chunkIndex } = req.body;
+      if (!req.file || !uploadId || chunkIndex === undefined) {
+        res.status(400).send("chunk, uploadId and chunkIndex required");
+        return;
+      }
+
+      const chunkDir = path.join(CHUNK_STORAGE, uploadId);
+      if (!fs.existsSync(chunkDir)) {
+        res.status(404).send("Upload session not found");
+        return;
+      }
+
+      const chunkPath = path.join(chunkDir, `chunk_${chunkIndex}`);
+      fs.renameSync(req.file.path, chunkPath);
+
+      console.log(
+        `[Traditional Chunked] Received chunk ${chunkIndex} for ${uploadId}`
+      );
+      res.json({ success: true, chunkIndex });
+    } catch (err) {
+      console.error("[Traditional Chunked] Chunk upload error:", err);
+      res.status(500).send("Chunk upload failed");
+    }
+  }
+);
+
+router.post(
+  "/traditional/chunk/complete",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { uploadId, filename, totalChunks } = req.body;
+      if (!uploadId || !filename || !totalChunks) {
+        res.status(400).send("uploadId, filename and totalChunks required");
+        return;
+      }
+
+      const chunkDir = path.join(CHUNK_STORAGE, uploadId);
+      const targetPath = path.join(PERSISTENT_STORAGE, filename);
+
+      const writeStream = fs.createWriteStream(targetPath);
+
+      for (let i = 0; i < totalChunks; i++) {
+        const chunkPath = path.join(chunkDir, `chunk_${i}`);
+        if (!fs.existsSync(chunkPath)) {
+          res.status(400).send(`Missing chunk ${i}`);
+          return;
+        }
+        const chunkData = fs.readFileSync(chunkPath);
+        writeStream.write(chunkData);
+      }
+
+      writeStream.end();
+
+      fs.rmSync(chunkDir, { recursive: true, force: true });
+
+      console.log(`[Traditional Chunked] Complete: ${filename}`);
+      res.json({ message: "Chunked upload complete", filename });
+    } catch (err) {
+      console.error("[Traditional Chunked] Complete error:", err);
+      res.status(500).send("Complete failed");
+    }
+  }
+);
+
+router.get(
+  "/traditional/chunk/download/:filename",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const filename = req.params.filename;
+      const start = parseInt(req.query.start as string) || 0;
+      const end = parseInt(req.query.end as string);
+      const filePath = path.join(PERSISTENT_STORAGE, filename);
+
+      if (!fs.existsSync(filePath)) {
+        res.status(404).send("File not found");
+        return;
+      }
+
+      const stat = fs.statSync(filePath);
+
+      if (isNaN(end)) {
+        res.json({ size: stat.size });
+        return;
+      }
+
+      const stream = fs.createReadStream(filePath, { start, end });
+      res.setHeader("Content-Length", end - start + 1);
+      res.setHeader("Content-Type", "application/octet-stream");
+      stream.pipe(res);
+    } catch (err) {
+      console.error("[Traditional Chunked] Download error:", err);
+      res.status(500).send("Download failed");
+    }
+  }
+);
+
 // --- MOD B: Optimized Upload (Presigned URLs) ---
 
 router.get("/optimized/get-upload-url", async (req: Request, res: Response) => {
@@ -111,11 +247,11 @@ router.get("/optimized/get-upload-url", async (req: Request, res: Response) => {
       24 * 60 * 60
     );
 
-    console.log(`[Optimized] Completed Multipart Upload for: ${filename}`);
-    res.json({ message: "Upload complete" });
+    console.log(`[Optimized] Generated Upload URL for: ${filename}`);
+    res.json({ url: presignedUrl, filename });
   } catch (err) {
-    console.error("[Optimized] Error completing multipart upload:", err);
-    res.status(500).send("Error completing multipart upload");
+    console.error("[Optimized] Error generating upload URL:", err);
+    res.status(500).send("Error generating URL");
   }
 });
 

@@ -7,6 +7,9 @@ interface OptimizedModeProps {
   onUploadSuccess?: (filename: string) => void;
 }
 
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+const PARALLEL_CHUNKS = 3;
+
 export const OptimizedMode: React.FC<OptimizedModeProps> = ({
   initialFilename,
   onUploadSuccess,
@@ -16,6 +19,7 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
   const [uploading, setUploading] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("Idle");
+  const [useChunked, setUseChunked] = useState(false);
 
   const [stats, setStats] = useState<{ duration: number; size: number } | null>(
     null
@@ -55,89 +59,126 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
       setFile(selectedFile);
       setStats(null);
       setVideoUrl(null);
+      setUploadProgress(0);
     }
   };
 
-  // Chunk size: 6MB (MinIO requires min 5MB for all parts except the last)
-  const CHUNK_SIZE = 6 * 1024 * 1024;
-
-  const handleUpload = async () => {
+  const handleChunkedUpload = async () => {
     if (!file) return;
 
     setUploading(true);
     setUploadProgress(0);
-    setStatus("Initiating Multipart Upload...");
+    setStatus("Starting chunked upload to MinIO...");
     const startTime = performance.now();
 
     try {
-      // 1. Initiate Multipart Upload
-      const {
-        data: { uploadId, filename },
-      } = await axios.post(
-        "http://localhost:3001/api/optimized/initiate-multipart",
-        {
-          filename: file.name,
-          contentType: file.type,
-        }
-      );
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+      let completedChunks = 0;
 
-      const totalParts = Math.ceil(file.size / CHUNK_SIZE);
-      const uploadedParts: { ETag: string; PartNumber: number }[] = [];
-      let uploadedBytes = 0;
-
-      setStatus(`Uploading ${totalParts} parts...`);
-
-      // 2. Upload chunks
-      for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
-        const start = (partNumber - 1) * CHUNK_SIZE;
+      const uploadChunk = async (chunkIndex: number) => {
+        const start = chunkIndex * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunk = file.slice(start, end);
 
-        // Get Presigned URL for this part
+        const chunkFilename = `${file.name}.part${chunkIndex}`;
+
         const {
-          data: { url: partUrl },
-        } = await axios.post(
-          "http://localhost:3001/api/optimized/get-multipart-url",
-          {
-            filename,
-            uploadId,
-            partNumber,
-          }
+          data: { url: uploadUrl },
+        } = await axios.get(
+          `http://localhost:3001/api/optimized/get-upload-url?filename=${encodeURIComponent(
+            chunkFilename
+          )}`
         );
 
-        // Upload part directly to MinIO
-        // Note: MinIO returns ETag in response headers for PUT
-        const response = await axios.put(partUrl, chunk, {
+        await axios.put(uploadUrl, chunk, {
           headers: { "Content-Type": "application/octet-stream" },
-          onUploadProgress: (progressEvent) => {
-            const chunkLoaded = progressEvent.loaded;
-            const totalLoaded = uploadedBytes + chunkLoaded;
-            const percent = Math.round((totalLoaded * 100) / file.size);
-            setUploadProgress(percent);
-          },
         });
 
-        uploadedBytes += chunk.size;
+        completedChunks++;
+        setUploadProgress(Math.round((completedChunks / totalChunks) * 100));
+      };
 
-        // ETag is normally wrapped in quotes, e.g. "hash"
-        const etag = response.headers["etag"].replace(/"/g, "");
-        uploadedParts.push({ ETag: etag, PartNumber: partNumber });
+      setStatus(`Uploading ${totalChunks} chunks in parallel...`);
 
-        // Optional: Update status per chunk for transparency
-        // setStatus(`Uploaded Part ${partNumber}/${totalParts}`);
+      for (let i = 0; i < totalChunks; i += PARALLEL_CHUNKS) {
+        const batch = [];
+        for (let j = i; j < Math.min(i + PARALLEL_CHUNKS, totalChunks); j++) {
+          batch.push(uploadChunk(j));
+        }
+        await Promise.all(batch);
       }
 
-      setStatus("Finalizing Upload...");
-
-      // 3. Complete Multipart Upload
-      await axios.post(
-        "http://localhost:3001/api/optimized/complete-multipart",
-        {
-          filename,
-          uploadId,
-          parts: uploadedParts,
-        }
+      const {
+        data: { url: uploadUrl, filename },
+      } = await axios.get(
+        `http://localhost:3001/api/optimized/get-upload-url?filename=${encodeURIComponent(
+          file.name
+        )}`
       );
+
+      await axios.put(uploadUrl, file, {
+        headers: { "Content-Type": file.type },
+      });
+
+      const endTime = performance.now();
+      setStats({
+        duration: (endTime - startTime) / 1000,
+        size: file.size,
+      });
+
+      setStatus("Chunked Upload Complete!");
+      if (onUploadSuccess) {
+        onUploadSuccess(filename);
+      }
+
+      const {
+        data: { url: downloadUrl },
+      } = await axios.get(
+        `http://localhost:3001/api/optimized/get-download-url/${encodeURIComponent(
+          filename
+        )}`
+      );
+      setVideoUrl(downloadUrl);
+    } catch (err) {
+      console.error(err);
+      setStatus("Chunked Upload Failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleNormalUpload = async () => {
+    if (!file) return;
+
+    setUploading(true);
+    setUploadProgress(0);
+    setStatus("Getting Presigned URL...");
+    const startTime = performance.now();
+
+    try {
+      const {
+        data: { url: uploadUrl, filename },
+      } = await axios.get(
+        `http://localhost:3001/api/optimized/get-upload-url?filename=${encodeURIComponent(
+          file.name
+        )}`
+      );
+
+      setStatus("Direct Upload to MinIO...");
+
+      await axios.put(uploadUrl, file, {
+        headers: {
+          "Content-Type": file.type,
+        },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const percent = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            setUploadProgress(percent);
+          }
+        },
+      });
 
       const endTime = performance.now();
       setStats({
@@ -150,7 +191,6 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
         onUploadSuccess(filename);
       }
 
-      // 4. Get Download URL
       const {
         data: { url: downloadUrl },
       } = await axios.get(
@@ -167,20 +207,82 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
     }
   };
 
+  const handleUpload = () => {
+    if (useChunked) {
+      handleChunkedUpload();
+    } else {
+      handleNormalUpload();
+    }
+  };
+
   const [downloadStats, setDownloadStats] = useState<{
     duration: number;
     size: number;
   } | null>(null);
   const [downloading, setDownloading] = useState(false);
 
-  const handleDownload = async () => {
+  const handleChunkedDownload = async () => {
     if (!videoUrl) return;
 
     setDownloading(true);
     const startTime = performance.now();
 
     try {
-      // Fetch directly from presigned URL
+      const headRes = await axios.head(videoUrl);
+      const fileSize = parseInt(headRes.headers["content-length"] || "0");
+
+      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+      const chunks: ArrayBuffer[] = new Array(totalChunks);
+
+      const downloadChunk = async (chunkIndex: number) => {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileSize) - 1;
+
+        const response = await axios.get(videoUrl, {
+          headers: { Range: `bytes=${start}-${end}` },
+          responseType: "arraybuffer",
+        });
+        chunks[chunkIndex] = response.data;
+      };
+
+      for (let i = 0; i < totalChunks; i += PARALLEL_CHUNKS) {
+        const batch = [];
+        for (let j = i; j < Math.min(i + PARALLEL_CHUNKS, totalChunks); j++) {
+          batch.push(downloadChunk(j));
+        }
+        await Promise.all(batch);
+      }
+
+      const blob = new Blob(chunks);
+
+      const endTime = performance.now();
+      setDownloadStats({
+        duration: (endTime - startTime) / 1000,
+        size: blob.size,
+      });
+
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `chunked-${file?.name || "video"}`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      console.error("Chunked download failed:", err);
+      alert("Chunked download failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleNormalDownload = async () => {
+    if (!videoUrl) return;
+
+    setDownloading(true);
+    const startTime = performance.now();
+
+    try {
       const response = await axios.get(videoUrl, {
         responseType: "blob",
       });
@@ -193,7 +295,6 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
         size: blob.size,
       });
 
-      // Trigger actual download in browser
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -206,6 +307,14 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
       alert("Download failed");
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleDownload = () => {
+    if (useChunked) {
+      handleChunkedDownload();
+    } else {
+      handleNormalDownload();
     }
   };
 
@@ -233,6 +342,19 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
       </p>
 
       <div className="space-y-4">
+        <label className="flex items-center gap-3 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={useChunked}
+            onChange={(e) => setUseChunked(e.target.checked)}
+            className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-gray-800"
+          />
+          <span className="text-sm text-gray-300">
+            <span className="font-medium text-emerald-400">Chunked Mode</span> -
+            Parallel upload/download (5MB chunks)
+          </span>
+        </label>
+
         <input
           type="file"
           accept="video/*"
@@ -255,7 +377,13 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
               : "bg-emerald-600 hover:bg-emerald-700 text-white"
           )}
         >
-          {uploading ? "Uploading Directly..." : "Upload via Direct Link"}
+          {uploading
+            ? useChunked
+              ? "Chunked Uploading..."
+              : "Uploading Directly..."
+            : useChunked
+            ? "Upload via Chunked Mode"
+            : "Upload via Direct Link"}
         </button>
 
         {uploading && (
@@ -279,7 +407,7 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
         {stats && (
           <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg flex flex-col gap-1">
             <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
-              Yükleme İstatistikleri
+              Yükleme İstatistikleri {useChunked && "(Chunked)"}
             </div>
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div className="text-gray-400">Boyut:</div>
@@ -302,20 +430,24 @@ export const OptimizedMode: React.FC<OptimizedModeProps> = ({
           <div className="mt-6 space-y-4 border-t border-emerald-500/20 pt-6">
             <div className="flex flex-col gap-2">
               <h3 className="text-sm font-medium text-gray-300 flex items-center justify-between">
-                <span>Playback (Direct Stream)</span>
+                <span>
+                  Playback {useChunked ? "(Chunked)" : "(Direct Stream)"}
+                </span>
                 <button
                   onClick={handleDownload}
                   disabled={downloading}
                   className="text-xs transition-colors bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 px-3 py-1 rounded-md border border-emerald-500/30"
                 >
-                  {downloading ? "Downloading..." : "Test Download Performance"}
+                  {downloading
+                    ? "Downloading..."
+                    : `Test ${useChunked ? "Chunked" : "Direct"} Download`}
                 </button>
               </h3>
 
               {downloadStats && (
                 <div className="bg-emerald-500/5 border border-dashed border-emerald-500/20 p-3 rounded-lg">
                   <div className="text-[10px] font-bold text-emerald-500/70 uppercase mb-1">
-                    Download Stats (Direct)
+                    Download Stats {useChunked && "(Chunked Parallel)"}
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 text-xs font-mono">
                     <span className="text-gray-500">Duration:</span>
